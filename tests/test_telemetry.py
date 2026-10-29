@@ -286,3 +286,71 @@ def test_concurrent_multithreaded_latency_logging(tmp_path: Path) -> None:
         assert parts[3] == "SUCCESS"
         assert parts[4] == "NONE"
 
+
+def test_ast_scanner_hardened_evasions() -> None:
+    """Verify scan_ast_for_forbidden_debuggers catches hardened evasion attempts."""
+    evasion_snippets = [
+        "import " + "pdb.set_trace",
+        "import " + "pdb.submodule as sub",
+        "import " + "ipdb.submodule",
+        "from " + "pdb.submodule import debug_helper",
+        "from " + "ipdb.frontend import run",
+        "from builtins import " + "breakpoint",
+        "builtins." + "breakpoint()",
+        "import importlib\nimportlib.import_module('" + "pdb.submodule')",
+        "import importlib\nimportlib.import_module(name='" + "pdb')",
+        "import importlib\nimportlib.import_module(name='" + "ipdb.client')",
+        "getattr(builtins, '" + "breakpoint')()",
+        "getattr(sys, '" + "set_trace')()",
+        "eval('break' + 'point()')",
+        "exec('import ' + 'pdb')",
+    ]
+
+    for snippet in evasion_snippets:
+        violations = tel.scan_ast_for_forbidden_debuggers(snippet, filename="evasion_test.py")
+        assert len(violations) > 0, f"Expected scanner to catch evasion snippet:\n{snippet}"
+
+
+def test_sanitize_pipeline_name_units() -> None:
+    """Verify sanitize_pipeline_name cleans delimiters and invalid chars."""
+    assert tel.sanitize_pipeline_name("simple_pipe") == "simple_pipe"
+    assert tel.sanitize_pipeline_name("pipe,with,commas") == "pipe_with_commas"
+    assert tel.sanitize_pipeline_name("pipe\nwith\rnewlines") == "pipe with newlines"
+    assert tel.sanitize_pipeline_name("  trimmed  ") == "trimmed"
+    assert tel.sanitize_pipeline_name("audio\r\nstream,chunk\t2") == "audio stream_chunk 2"
+    assert tel.sanitize_pipeline_name(",,,,") == "____"
+    assert tel.sanitize_pipeline_name("") == "unnamed_pipeline"
+    assert tel.sanitize_pipeline_name("   \n\t  ") == "unnamed_pipeline"
+
+
+def test_latency_tracker_csv_sanitization(tmp_path: Path) -> None:
+    """Verify @latency_tracker preserves 5-column CSV even with commas and newlines in pipeline_name."""
+    import time
+
+    tel.setup_telemetry(base_dir=tmp_path, force_reconfigure=True)
+
+    @tel.latency_tracker("audio,ingestion\npipeline,v1")
+    def dirty_name_task() -> str:
+        return "ok"
+
+    res = dirty_name_task()
+    assert res == "ok"
+
+    lat_logger = tel.logging.getLogger("lang_attack.latency")
+    for h in lat_logger.handlers:
+        h.flush()
+
+    today = time.strftime("%Y-%m-%d")
+    lat_log = tmp_path / today / "latency.log"
+    assert lat_log.exists()
+    lines = [ln.strip() for ln in lat_log.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert len(lines) >= 1
+    last_line = lines[-1]
+    parts = last_line.split(",")
+    # Must have exactly 5 columns
+    assert len(parts) == 5
+    assert parts[1] == "audio_ingestion pipeline_v1"
+    assert parts[3] == "SUCCESS"
+    assert parts[4] == "NONE"
+
+

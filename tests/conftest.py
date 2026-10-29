@@ -91,10 +91,19 @@ def qapp() -> Generator[Any, None, None]:
 # ---------------------------------------------------------------------------
 # Mock sounddevice
 # ---------------------------------------------------------------------------
+class MockSoundDeviceDefault:
+    samplerate: int = 16000
+    device: tuple[int, int] = (0, 1)
+    channels: tuple[int, int] = (1, 2)
+
+
 class MockSoundDeviceModule:
     """Simulates sounddevice recording, playback, and device enumeration."""
 
+    default = MockSoundDeviceDefault()
+
     def __init__(self) -> None:
+        self.default = MockSoundDeviceDefault()
         self.recorded_chunks: list[Any] = []
         self.is_recording: bool = False
         self.is_playing: bool = False
@@ -166,8 +175,8 @@ class MockSoundDeviceModule:
 def mock_sounddevice(monkeypatch: pytest.MonkeyPatch) -> MockSoundDeviceModule:
     """Auto-mock sounddevice across all test modules."""
     mock_sd = MockSoundDeviceModule()
-    sys.modules["sounddevice"] = mock_sd  # type: ignore[assignment]
-    monkeypatch.setattr(sys, "modules", {**sys.modules, "sounddevice": mock_sd})
+    monkeypatch.setitem(sys.modules, "sounddevice", mock_sd)  # type: ignore[assignment]
+    monkeypatch.setitem(sys.modules, "sounddevice.default", mock_sd.default)  # type: ignore[assignment]
     return mock_sd
 
 

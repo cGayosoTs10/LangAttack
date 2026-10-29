@@ -20,9 +20,61 @@ from lang_attack.config import LOGS_DIR, REPO_ROOT
 T = TypeVar("T")
 
 # Constants for AST scanner verification
-FORBIDDEN_MODULES: tuple[str, ...] = ("pdb", "ipdb")
+FORBIDDEN_MODULES: tuple[str, ...] = ("pdb", "ipdb", "pudb", "rpdb")
 FORBIDDEN_CALLS: tuple[str, ...] = ("breakpoint",)
-FORBIDDEN_ATTRS: tuple[str, ...] = ("set_trace",)
+FORBIDDEN_ATTRS: tuple[str, ...] = ("set_trace", "post_mortem", "pm")
+
+
+def _is_forbidden_module(name: str | None) -> bool:
+    """Check if a module name is a forbidden debugger or a submodule of one."""
+    if not name or not isinstance(name, str):
+        return False
+    return any(
+        name == mod or name.startswith(f"{mod}.")
+        for mod in FORBIDDEN_MODULES
+    )
+
+
+def _get_constant_str(node: ast.AST | None) -> str | None:
+    """Extract string value from Constant or folded BinOp string concatenations."""
+    if node is None:
+        return None
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _get_constant_str(node.left)
+        right = _get_constant_str(node.right)
+        if left is not None and right is not None:
+            return left + right
+    return None
+
+
+def _extract_module_arg(node: ast.Call) -> str | None:
+    """Extract constant module name from positional or keyword arguments."""
+    if node.args:
+        val = _get_constant_str(node.args[0])
+        if val is not None:
+            return val
+    for kw in node.keywords:
+        if kw.arg == "name":
+            val = _get_constant_str(kw.value)
+            if val is not None:
+                return val
+    return None
+
+
+def sanitize_pipeline_name(name: str) -> str:
+    """Sanitize pipeline name to ensure 5-column CSV format integrity.
+
+    Replaces commas with underscores, replaces carriage returns and newlines with spaces,
+    collapses multiple whitespace characters, and strips leading/trailing whitespace.
+    """
+    if not isinstance(name, str):
+        name = str(name)
+    clean = name.replace(",", "_").replace("\r", " ").replace("\n", " ").strip()
+    clean = " ".join(clean.split())
+    return clean or "unnamed_pipeline"
+
 
 
 def get_daily_log_dir(base_dir: Path | None = None) -> Path:
@@ -153,7 +205,9 @@ def latency_tracker(pipeline_name: str) -> Callable[[Callable[..., T]], Callable
 
     Logs CSV format: timestamp,pipeline_name,duration_ms,status,error_type
     Transparently propagates all exceptions without swallow.
+    Sanitizes pipeline_name to preserve 5-column CSV format integrity.
     """
+    clean_pipeline_name = sanitize_pipeline_name(pipeline_name)
 
     def decorator(fn: Callable[..., T]) -> Callable[..., T]:
         @wraps(fn)
@@ -165,7 +219,7 @@ def latency_tracker(pipeline_name: str) -> Callable[[Callable[..., T]], Callable
                 return fn(*args, **kwargs)
             except BaseException as exc:
                 status = "FAIL"
-                error_type = type(exc).__name__
+                error_type = sanitize_pipeline_name(type(exc).__name__)
                 raise
             finally:
                 elapsed_ms = (time.perf_counter() - start_time) * 1000.0
@@ -174,7 +228,7 @@ def latency_tracker(pipeline_name: str) -> Callable[[Callable[..., T]], Callable
                 logger.info(
                     "%s,%s,%.2f,%s,%s",
                     now_str,
-                    pipeline_name,
+                    clean_pipeline_name,
                     elapsed_ms,
                     status,
                     error_type,
@@ -206,43 +260,62 @@ def scan_ast_for_forbidden_debuggers(
         lineno = getattr(node, "lineno", 0)
         if isinstance(node, ast.Import):
             for alias in node.names:
-                if alias.name in FORBIDDEN_MODULES:
+                if _is_forbidden_module(alias.name):
                     violations.append(
                         f"{filename}:{lineno}: Prohibited import of '{alias.name}'"
                     )
         elif isinstance(node, ast.ImportFrom):
-            if node.module in FORBIDDEN_MODULES:
+            if _is_forbidden_module(node.module):
                 violations.append(
                     f"{filename}:{lineno}: Prohibited import from '{node.module}'"
                 )
+            for alias in node.names:
+                if alias.name in FORBIDDEN_CALLS or alias.name in FORBIDDEN_ATTRS:
+                    violations.append(
+                        f"{filename}:{lineno}: Prohibited import of '{alias.name}' from '{node.module}'"
+                    )
         elif isinstance(node, ast.Call):
             if isinstance(node.func, ast.Name):
-                if node.func.id in FORBIDDEN_CALLS:
+                func_id = node.func.id
+                if func_id in FORBIDDEN_CALLS or func_id in FORBIDDEN_ATTRS:
                     violations.append(
-                        f"{filename}:{lineno}: Prohibited call '{node.func.id}()'"
+                        f"{filename}:{lineno}: Prohibited call '{func_id}()'"
                     )
-                elif node.func.id == "__import__" and node.args:
-                    first_arg = node.args[0]
-                    if (
-                        isinstance(first_arg, ast.Constant)
-                        and first_arg.value in FORBIDDEN_MODULES
-                    ):
+                elif func_id in ("__import__", "import_module"):
+                    mod_arg = _extract_module_arg(node)
+                    if _is_forbidden_module(mod_arg):
                         violations.append(
-                            f"{filename}:{lineno}: Prohibited dynamic import '__import__(\"{first_arg.value}\")'"
+                            f"{filename}:{lineno}: Prohibited dynamic import '{func_id}(\"{mod_arg}\")'"
+                        )
+                elif func_id in ("eval", "exec") and node.args:
+                    code_str = _get_constant_str(node.args[0])
+                    if code_str:
+                        inner = scan_ast_for_forbidden_debuggers(code_str, filename=filename)
+                        if inner:
+                            violations.append(
+                                f"{filename}:{lineno}: Prohibited debugger in dynamic '{func_id}()'"
+                            )
+                elif func_id == "getattr" and len(node.args) >= 2:
+                    second_arg_val = _get_constant_str(node.args[1])
+                    if second_arg_val and (second_arg_val in FORBIDDEN_ATTRS or second_arg_val in FORBIDDEN_CALLS):
+                        violations.append(
+                            f"{filename}:{lineno}: Prohibited dynamic attribute access 'getattr(..., \"{second_arg_val}\")'"
                         )
             elif isinstance(node.func, ast.Attribute):
-                if node.func.attr in FORBIDDEN_ATTRS:
+                attr_name = node.func.attr
+                if attr_name in FORBIDDEN_ATTRS or attr_name in FORBIDDEN_CALLS:
                     violations.append(
-                        f"{filename}:{lineno}: Prohibited call '{node.func.attr}()'"
+                        f"{filename}:{lineno}: Prohibited call '{attr_name}()'"
                     )
-                elif node.func.attr == "import_module" and node.args:
-                    first_arg = node.args[0]
-                    if (
-                        isinstance(first_arg, ast.Constant)
-                        and first_arg.value in FORBIDDEN_MODULES
-                    ):
+                elif isinstance(node.func.value, ast.Name) and _is_forbidden_module(node.func.value.id):
+                    violations.append(
+                        f"{filename}:{lineno}: Prohibited call on forbidden module '{node.func.value.id}.{attr_name}()'"
+                    )
+                elif attr_name in ("import_module", "__import__"):
+                    mod_arg = _extract_module_arg(node)
+                    if _is_forbidden_module(mod_arg):
                         violations.append(
-                            f"{filename}:{lineno}: Prohibited dynamic import 'import_module(\"{first_arg.value}\")'"
+                            f"{filename}:{lineno}: Prohibited dynamic import '{attr_name}(\"{mod_arg}\")'"
                         )
     return violations
 
@@ -279,6 +352,7 @@ __all__ = [
     "DailyPartitionFileHandler",
     "get_daily_log_dir",
     "latency_tracker",
+    "sanitize_pipeline_name",
     "scan_ast_for_forbidden_debuggers",
     "scan_codebase_for_debuggers",
     "setup_telemetry",
