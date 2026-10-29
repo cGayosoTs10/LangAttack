@@ -1,0 +1,42 @@
+[project]
+name = "lang-attack"
+version = "0.1.0"
+description = "Language learning production desktop application"
+readme = "README.md"
+authors = [
+    { name = "Cauê Gayoso Tavares da Silva", email = "caue.gts10@tutamail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "faster-whisper>=1.0.0",
+    "google-genai>=0.1.0",
+    "kokoro-onnx>=0.3.0",
+    "numpy>=1.26.0",
+    "pydantic>=2.7.0",
+    "pyside6>=6.7.0",
+    "scipy>=1.13.0",
+    "sounddevice>=0.4.6",
+    "trafilatura>=1.8.0",
+    "youtube-transcript-api>=0.6.2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "ruff>=0.4.0",
+    "ty",
+]
+
+[tool.uv]
+managed = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.ty]
+strict = true

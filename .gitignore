@@ -1,0 +1,62 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Agents & Teamwork metadata
+.agents/
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+
+# Build & Distribution artifacts
+build/
+dist/
+*.egg-info/
+*.egg
+eggs/
+.eggs/
+wheels/
+*.whl
+
+# Tooling, Linters & Test caches
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ty_cache/
+
+# Local databases & storage
+database/*.db
+database/*.sqlite*
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs & Telemetry
+logs/
+*.log
+
+# SSH Keys and secrets
+id_*
+*.pem
+*.key
+*.pub
+*.crt
+
+# Environment variables & secrets
+.env
+.env.*
+!.env.example
+
+# OS generated files & temporary files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+*.tmp
