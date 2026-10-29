@@ -14,6 +14,7 @@ Provides fixtures for:
 
 import os
 import sys
+import types
 import wave
 import zoneinfo
 from collections.abc import Generator
@@ -327,6 +328,59 @@ def mock_llm() -> MagicMock:
         }
     ]
     return llm
+
+
+# ---------------------------------------------------------------------------
+# Stub Ingestion Libraries if not installed (Offline / Headless CI)
+# ---------------------------------------------------------------------------
+if "trafilatura" not in sys.modules:
+    try:
+        import trafilatura  # noqa: F401
+    except ImportError:
+        mock_traf = types.ModuleType("trafilatura")
+        mock_traf.fetch_url = MagicMock(
+            return_value=(
+                "<html><head><title>Test Article</title></head>"
+                "<body><h1>Test Article</h1>"
+                "<p>Sample article content for offline testing.</p></body></html>"
+            )
+        )
+        mock_traf.extract = MagicMock(
+            return_value="# Test Article\n\nSample article content for offline testing."
+        )
+
+        class MockMeta:
+            title = "Test Article"
+            author = "Test Author"
+            date = "2026-10-29"
+            language = "en"
+
+        mock_traf.extract_metadata = MagicMock(return_value=MockMeta())
+        sys.modules["trafilatura"] = mock_traf
+
+if "youtube_transcript_api" not in sys.modules:
+    try:
+        import youtube_transcript_api  # noqa: F401
+    except ImportError:
+        mock_yt = types.ModuleType("youtube_transcript_api")
+
+        class YouTubeTranscriptApiStub:
+            @staticmethod
+            def get_transcript(
+                video_id: str,
+                languages: tuple[str, ...] | list[str] = ("en", "pt"),
+            ) -> list[dict[str, Any]]:
+                return [
+                    {"text": "Hello world", "start": 0.0, "duration": 2.0},
+                    {
+                        "text": "Welcome to language learning practice.",
+                        "start": 2.0,
+                        "duration": 3.0,
+                    },
+                ]
+
+        mock_yt.YouTubeTranscriptApi = YouTubeTranscriptApiStub
+        sys.modules["youtube_transcript_api"] = mock_yt
 
 
 # ---------------------------------------------------------------------------
