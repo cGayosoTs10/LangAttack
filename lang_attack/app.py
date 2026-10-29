@@ -8,6 +8,11 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 
+if __package__ is None or __package__ == "":
+    repo_root = Path(__file__).resolve().parent.parent
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+
 from lang_attack.config import REPO_ROOT
 from lang_attack.db.connection import init_db
 from lang_attack.telemetry import setup_daily_logging

@@ -28,7 +28,8 @@ dev = [
 ]
 
 [tool.uv]
-managed = false
+managed = true
+package = false
 
 [tool.ruff]
 line-length = 100

@@ -28,15 +28,15 @@ _ = zoneinfo.ZoneInfo("UTC")
 # 1. Enforce headless Qt platform before any PySide6 import
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
-# 2. Add local system site-packages if needed for PySide6, Pydantic, and Numpy
+# 2. Add local system site-packages only if matching current python minor version and needed
+cur_ver = f"python{sys.version_info.major}.{sys.version_info.minor}"
 for candidate in [
-    "/home/lobachevsky/.local/lib/python3.14/site-packages",
-    "/usr/lib64/python3.14/site-packages",
-    "/usr/lib/python3.14/site-packages",
-    "/home/lobachevsky/.local/lib/python3.13/site-packages",
+    f"/home/lobachevsky/.local/lib/{cur_ver}/site-packages",
+    f"/usr/lib64/{cur_ver}/site-packages",
+    f"/usr/lib/{cur_ver}/site-packages",
 ]:
     if os.path.exists(candidate) and candidate not in sys.path:
-        sys.path.insert(0, candidate)
+        sys.path.append(candidate)
 
 import pytest  # noqa: E402
 
