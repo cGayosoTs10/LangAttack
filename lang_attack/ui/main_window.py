@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QThreadPool
+from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QMainWindow,
     QSplitter,
@@ -66,5 +67,25 @@ class MainWindow(QMainWindow):
         # When a sentence is chosen for speech training in center deck, send to right lab
         self.center_deck.sentence_to_practice.connect(self.right_lab.set_target_text)
 
+    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
+        """Gracefully handle window close: cleanup panels and wait for background threads."""
+        logger.info("MainWindow closing, initiating graceful teardown...")
+        if hasattr(self, "right_lab") and self.right_lab is not None:
+            try:
+                self.right_lab.cleanup()
+            except Exception as e:
+                logger.warning("Error during right_lab cleanup: %s", e)
+
+        try:
+            pool = QThreadPool.globalInstance()
+            pool.clear()
+            pool.waitForDone(1000)
+        except Exception as e:
+            logger.warning("Error waiting for background threads: %s", e)
+
+        event.accept()
+        super().closeEvent(event)
+
 
 __all__ = ["MainWindow"]
+

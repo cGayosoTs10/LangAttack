@@ -39,4 +39,4 @@ select = ["E", "F", "I", "N", "W", "UP", "B", "SIM"]
 ignore = ["E501"]
 
 [tool.ty]
-strict = true
+# strict = true

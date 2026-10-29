@@ -8,8 +8,11 @@ Covers:
 - Boundary: Empty audio, silent audio, empty strings, API timeouts, articulatory tips
 """
 
+import os
+import threading
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from tests.conftest import generate_test_wav
@@ -126,3 +129,62 @@ def test_phonetics_articulatory_feedback_on_low_score(
 
     result = evaluate_speech("thought", test_wav, language="en")
     assert result is not None
+
+
+def test_audio_recorder_stop_recording_liveness() -> None:
+    """Verify AudioRecorder.start_recording() and stop_recording() execute without deadlock."""
+    from lang_attack.core.audio_recorder import AudioRecorder
+
+    rec = AudioRecorder(sample_rate=16000, channels=1)
+    rec.start_recording()
+
+    result: dict[str, object] = {"audio": None, "error": None}
+
+    def target() -> None:
+        try:
+            result["audio"] = rec.stop_recording()
+        except Exception as exc:
+            result["error"] = exc
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    thread.join(timeout=2.0)
+    assert not thread.is_alive(), "AudioRecorder.stop_recording() deadlocked!"
+    assert result["error"] is None
+    assert isinstance(result["audio"], np.ndarray)
+    assert result["audio"].ndim == 1
+
+
+def test_audio_recorder_save_wav_without_explicit_audio(tmp_path: Path) -> None:
+    """Verify save_wav invokes stop_recording internally without deadlock."""
+    from lang_attack.core.audio_recorder import AudioRecorder
+
+    rec = AudioRecorder(sample_rate=16000, channels=1)
+    rec.start_recording()
+    out_wav = tmp_path / "auto_recorded.wav"
+
+    def target() -> None:
+        rec.save_wav(out_wav)
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    thread.join(timeout=2.0)
+    assert not thread.is_alive(), "AudioRecorder.save_wav() deadlocked on stop_recording()!"
+    assert out_wav.exists()
+
+
+def test_tts_symlink_rejection(tmp_path: Path) -> None:
+    """Verify TTS refuses to write audio to a symbolic link (CWE-377 / CWE-59)."""
+    from lang_attack.core.tts import synthesize_speech
+
+    victim = tmp_path / "victim.txt"
+    victim.write_text("SENSITIVE_DATA", encoding="utf-8")
+
+    symlink_wav = tmp_path / "symlink_audio.wav"
+    os.symlink(victim, symlink_wav)
+
+    with pytest.raises(ValueError, match="Refusing to write audio to symbolic link"):
+        synthesize_speech("Hello secure world", symlink_wav)
+
+    assert victim.read_text(encoding="utf-8") == "SENSITIVE_DATA"
+

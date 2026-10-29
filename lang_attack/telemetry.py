@@ -229,17 +229,20 @@ def latency_tracker(pipeline_name: str) -> Callable[[Callable[..., T]], Callable
                 error_type = sanitize_pipeline_name(type(exc).__name__)
                 raise
             finally:
-                elapsed_ms = (time.perf_counter() - start_time) * 1000.0
-                now_str = time.strftime("%Y-%m-%d %H:%M:%S")
-                logger = logging.getLogger("lang_attack.latency")
-                logger.info(
-                    "%s,%s,%.2f,%s,%s",
-                    now_str,
-                    clean_pipeline_name,
-                    elapsed_ms,
-                    status,
-                    error_type,
-                )
+                try:
+                    elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+                    now_str = time.strftime("%Y-%m-%d %H:%M:%S")
+                    logger = logging.getLogger("lang_attack.latency")
+                    logger.info(
+                        "%s,%s,%.2f,%s,%s",
+                        now_str,
+                        clean_pipeline_name,
+                        elapsed_ms,
+                        status,
+                        error_type,
+                    )
+                except Exception:
+                    pass
 
         return wrapper
 

@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -92,29 +93,49 @@ class BaseLLMProvider(ABC):
         if data is None:
             return []
 
-        raw_list: list[Any] = []
-        if isinstance(data, list):
-            raw_list = data
-        elif isinstance(data, dict):
-            for key in ("items", "exercises", "drills", "questions"):
-                if isinstance(data.get(key), list):
-                    raw_list = data[key]
-                    break
-
         valid_items: list[ExerciseItem] = []
-        for idx, item_data in enumerate(raw_list):
-            if not isinstance(item_data, dict):
-                continue
+        if data is not None:
+            raw_list: list[Any] = []
+            if isinstance(data, list):
+                raw_list = data
+            elif isinstance(data, dict):
+                for key in ("items", "exercises", "drills", "questions"):
+                    if isinstance(data.get(key), list):
+                        raw_list = data[key]
+                        break
+
+            for idx, item_data in enumerate(raw_list):
+                if not isinstance(item_data, dict):
+                    continue
+                try:
+                    if "id" not in item_data or not item_data["id"]:
+                        item_data["id"] = f"ex-llm-{idx+1}"
+                    if "language" not in item_data or not item_data["language"]:
+                        item_data["language"] = language
+                    item = ExerciseItem.model_validate(item_data)
+                    valid_items.append(item)
+                except Exception as err:
+                    logger.warning(
+                        "Exercise item validation skipped invalid payload: %s (%s)", item_data, err
+                    )
+                    continue
+
+        if valid_items:
+            return valid_items
+
+        # Resgate de JSON truncado via extração de objetos isolados
+        for idx, obj_match in enumerate(re.finditer(r"\{[^{}]*\}", text)):
             try:
-                if "id" not in item_data or not item_data["id"]:
-                    item_data["id"] = f"ex-llm-{idx+1}"
-                if "language" not in item_data or not item_data["language"]:
-                    item_data["language"] = language
-                item = ExerciseItem.model_validate(item_data)
-                valid_items.append(item)
-            except Exception as err:
-                logger.debug("Exercise item validation skipped invalid payload: %s (%s)", item_data, err)
+                item_data = json.loads(obj_match.group(0))
+                if isinstance(item_data, dict) and "correct_answer" in item_data and (
+                    "prompt" in item_data or "question" in item_data
+                ):
+                    item_data.setdefault("id", f"ex-llm-rescued-{idx+1}")
+                    item_data.setdefault("language", language)
+                    valid_items.append(ExerciseItem.model_validate(item_data))
+            except Exception:
                 continue
+
         return valid_items
 
     def _algorithmic_fallback_exercises(
@@ -202,10 +223,14 @@ class BaseLLMProvider(ABC):
         return items
 
     def generate_exercises(
-        self, text: str, language: str = "en", num_items: int = 5
+        self, text: str = "", language: str = "en", num_items: int = 5, **kwargs: Any
     ) -> list[ExerciseItem]:
         """Generate structured interactive exercises from study material with authentic fallback."""
-        if num_items <= 0 or not text or not text.strip():
+        if not text and "note_content" in kwargs:
+            text = kwargs["note_content"]
+        if num_items == 5 and "num_exercises" in kwargs:
+            num_items = kwargs["num_exercises"]
+        if not text or not text.strip() or num_items <= 0:
             return []
 
         system_prompt = (
@@ -267,12 +292,25 @@ class BaseLLMProvider(ABC):
 
 
 class GeminiProvider(BaseLLMProvider):
-    """Google Gemini Flash LLM provider."""
+    """Google Gemini Flash LLM provider with retry, timeout, and Ollama fallback."""
 
-    def __init__(self, api_key: str | None = None, model: str = "gemini-3.8-flash") -> None:
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str = "gemini-3.8-flash",
+        timeout: float = 30.0,
+        max_retries: int = 2,
+        fallback_endpoint: str | None = None,
+    ) -> None:
         self.api_key = api_key or os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", "")
         self.model = model
+        self.timeout = timeout
+        self.max_retries = max_retries
         self._client: Any = None
+        self._fallback_provider: BaseLLMProvider | None = None
+        if fallback_endpoint or os.getenv("OLLAMA_ENDPOINT"):
+            ep = fallback_endpoint or os.getenv("OLLAMA_ENDPOINT", "http://localhost:11434")
+            self._fallback_provider = OllamaProvider(endpoint=ep, timeout=timeout, max_retries=1)
 
     def _get_client(self) -> Any:
         if self._client is None and self.api_key:
@@ -286,23 +324,42 @@ class GeminiProvider(BaseLLMProvider):
 
     @latency_tracker("llm_generate_gemini")
     def generate(self, prompt: str, system_prompt: str | None = None) -> str:
-        """Generate text completion using Gemini Flash with offline fallback."""
+        """Generate text completion using Gemini Flash with retry and Ollama/deterministic fallback."""
         if not prompt or not prompt.strip():
             return ""
 
         client = self._get_client()
         if client is not None:
+            config = {"system_instruction": system_prompt} if system_prompt else None
+            for attempt in range(self.max_retries + 1):
+                try:
+                    response = client.models.generate_content(
+                        model=self.model,
+                        contents=prompt,
+                        config=config,
+                    )
+                    if hasattr(response, "text") and response.text:
+                        return str(response.text).strip()
+                except Exception as e:
+                    if attempt < self.max_retries:
+                        time.sleep(0.5 * (2**attempt))
+                        continue
+                    logger.warning(
+                        "Gemini API generation failed after %d attempts: %s. Trying fallback.",
+                        self.max_retries + 1,
+                        e,
+                    )
+
+        # Fallback to local Ollama if configured
+        if self._fallback_provider is not None:
             try:
-                config = {"system_instruction": system_prompt} if system_prompt else None
-                response = client.models.generate_content(
-                    model=self.model,
-                    contents=prompt,
-                    config=config,
+                fallback_res = self._fallback_provider.generate(
+                    prompt, system_prompt=system_prompt
                 )
-                if hasattr(response, "text") and response.text:
-                    return str(response.text).strip()
-            except Exception as e:
-                logger.warning("Gemini API generation failed: %s. Using fallback.", e)
+                if fallback_res and not fallback_res.startswith("Ollama local assistant response to:"):
+                    return fallback_res
+            except Exception as exc:
+                logger.warning("Ollama fallback failed: %s", exc)
 
         # Resilient conversational fallback for offline/test execution (zero prompt sniffing)
         summary = prompt.strip().replace("\n", " ")
@@ -312,17 +369,23 @@ class GeminiProvider(BaseLLMProvider):
 
 
 class OllamaProvider(BaseLLMProvider):
-    """Local Ollama endpoint provider for Gemma 12B."""
+    """Local Ollama endpoint provider for Gemma 12B with configurable timeout and retries."""
 
     def __init__(
-        self, endpoint: str = "http://localhost:11434", model: str = "gemma:12b"
+        self,
+        endpoint: str = "http://localhost:11434",
+        model: str = "gemma:12b",
+        timeout: float = 30.0,
+        max_retries: int = 2,
     ) -> None:
         self.endpoint = endpoint.rstrip("/")
         self.model = model
+        self.timeout = timeout
+        self.max_retries = max_retries
 
     @latency_tracker("llm_generate_ollama")
     def generate(self, prompt: str, system_prompt: str | None = None) -> str:
-        """Generate completion using local Ollama instance with offline fallback."""
+        """Generate completion using local Ollama instance with retry and offline fallback."""
         if not prompt or not prompt.strip():
             return ""
 
@@ -336,20 +399,48 @@ class OllamaProvider(BaseLLMProvider):
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
 
+        for attempt in range(self.max_retries + 1):
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as response:
+                    result = json.loads(response.read().decode("utf-8"))
+                    return str(result.get("response", "")).strip()
+            except Exception as e:
+                if attempt < self.max_retries:
+                    time.sleep(0.5 * (2**attempt))
+                    continue
+                logger.warning(
+                    "Ollama request to %s failed after %d attempts: %s. Using fallback.",
+                    url,
+                    self.max_retries + 1,
+                    e,
+                )
+
+        summary = prompt.strip().replace("\n", " ")
+        if len(summary) > 40:
+            summary = summary[:40] + "..."
+        return f"Ollama local assistant response to: '{summary}'"
+
+
+class FallbackLLMProvider(BaseLLMProvider):
+    """Resilient composite provider chaining primary LLM with secondary fallback."""
+
+    def __init__(self, primary: BaseLLMProvider, fallback: BaseLLMProvider) -> None:
+        self.primary = primary
+        self.fallback = fallback
+
+    def generate(self, prompt: str, system_prompt: str | None = None) -> str:
         try:
-            with urllib.request.urlopen(req, timeout=10.0) as response:
-                result = json.loads(response.read().decode("utf-8"))
-                return str(result.get("response", "")).strip()
+            res = self.primary.generate(prompt, system_prompt=system_prompt)
+            if res and not res.startswith("Language learning assistant response to:"):
+                return res
         except Exception as e:
-            logger.warning("Ollama request to %s failed: %s. Using fallback.", url, e)
-            summary = prompt.strip().replace("\n", " ")
-            if len(summary) > 40:
-                summary = summary[:40] + "..."
-            return f"Ollama local assistant response to: '{summary}'"
+            logger.warning("Primary provider failed: %s. Chaining to fallback.", e)
+        return self.fallback.generate(prompt, system_prompt=system_prompt)
 
 
 def get_llm_provider(config: Any = None, provider_name: str | None = None) -> BaseLLMProvider:
     """Factory creating the configured LLM provider instance."""
+
     def _get_conf(cfg: Any, key: str, default: Any = None) -> Any:
         if cfg is None:
             return default
@@ -361,7 +452,8 @@ def get_llm_provider(config: Any = None, provider_name: str | None = None) -> Ba
     if p_name == "ollama":
         endpoint = _get_conf(config, "ollama_endpoint", "http://localhost:11434")
         model = _get_conf(config, "ollama_model", "gemma:12b")
-        return OllamaProvider(endpoint=endpoint, model=model)
+        timeout = float(_get_conf(config, "timeout", 30.0))
+        return OllamaProvider(endpoint=endpoint, model=model, timeout=timeout)
 
     api_key = _get_conf(config, "api_key") or _get_conf(config, "gemini_api_key")
     model = (
@@ -369,11 +461,19 @@ def get_llm_provider(config: Any = None, provider_name: str | None = None) -> Ba
         or _get_conf(config, "gemini_model")
         or "gemini-3.8-flash"
     )
-    return GeminiProvider(api_key=api_key, model=model)
+    timeout = float(_get_conf(config, "timeout", 30.0))
+    fallback_endpoint = _get_conf(config, "ollama_endpoint")
+    return GeminiProvider(
+        api_key=api_key,
+        model=model,
+        timeout=timeout,
+        fallback_endpoint=fallback_endpoint,
+    )
 
 
 __all__ = [
     "BaseLLMProvider",
+    "FallbackLLMProvider",
     "GeminiProvider",
     "OllamaProvider",
     "get_llm_provider",

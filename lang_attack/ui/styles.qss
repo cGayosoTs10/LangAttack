@@ -167,17 +167,18 @@ QScrollBar::handle:vertical:hover {
 }
 
 /* GOP Pronunciation Color Classes */
-.gop-canonical, .gop-green {
+[class="gop-canonical"], [class="gop-green"] {
     color: #4CAF50;
     font-weight: bold;
 }
 
-.gop-accented, .gop-yellow {
+[class="gop-accented"], [class="gop-yellow"] {
     color: #FFC107;
     font-weight: bold;
 }
 
-.gop-critical, .gop-red {
+[class="gop-critical"], [class="gop-red"] {
     color: #F44336;
     font-weight: bold;
 }
+

@@ -1,8 +1,9 @@
 """Phonetics assessment Pydantic v2 schemas."""
 
-from typing import Literal
+import math
+from typing import Any, Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class PhonemeEvaluation(BaseModel):
@@ -32,8 +33,8 @@ class PhonemeEvaluation(BaseModel):
     expected_phoneme: str | None = Field(default=None, description="Canonical phoneme")
     detected_phoneme: str | None = Field(default=None, description="Detected phoneme")
     is_correct: bool | None = Field(default=None, description="Correctness flag")
-    start_time: float | None = Field(default=None, description="Start timestamp (s)")
-    end_time: float | None = Field(default=None, description="End timestamp (s)")
+    start_time: float | None = Field(default=None, ge=0.0, description="Start timestamp (s)")
+    end_time: float | None = Field(default=None, ge=0.0, description="End timestamp (s)")
 
     @property
     def gop_score(self) -> float:
@@ -44,6 +45,20 @@ class PhonemeEvaluation(BaseModel):
     def ipa(self) -> str | None:
         """Alias property for ipa_symbol."""
         return self.ipa_symbol
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def normalize_status(cls, val: Any) -> Any:
+        if isinstance(val, str):
+            return val.strip().lower()
+        return val
+
+    @field_validator("score", "start_time", "end_time", mode="after")
+    @classmethod
+    def check_finite(cls, val: float | None) -> float | None:
+        if val is not None and (math.isnan(val) or math.isinf(val)):
+            raise ValueError("Numeric values must be finite and not NaN/Inf")
+        return val
 
     @model_validator(mode="after")
     def validate_timestamps(self) -> "PhonemeEvaluation":
@@ -73,14 +88,21 @@ class WordEvaluation(BaseModel):
     phonemes: list[PhonemeEvaluation] = Field(
         default_factory=list, description="Constituent phonemes"
     )
-    start_time: float | None = Field(default=None, description="Start timestamp (s)")
-    end_time: float | None = Field(default=None, description="End timestamp (s)")
+    start_time: float | None = Field(default=None, ge=0.0, description="Start timestamp (s)")
+    end_time: float | None = Field(default=None, ge=0.0, description="End timestamp (s)")
     is_correct: bool | None = Field(default=None, description="Correctness flag")
 
     @property
     def gop_score(self) -> float:
         """Alias property for score."""
         return self.score
+
+    @field_validator("score", "start_time", "end_time", mode="after")
+    @classmethod
+    def check_finite(cls, val: float | None) -> float | None:
+        if val is not None and (math.isnan(val) or math.isinf(val)):
+            raise ValueError("Numeric values must be finite and not NaN/Inf")
+        return val
 
     @model_validator(mode="after")
     def validate_timestamps(self) -> "WordEvaluation":
@@ -132,6 +154,25 @@ class SpeechAssessmentResult(BaseModel):
     articulation_tips: list[str] = Field(
         default_factory=list, description="Targeted articulatory guidance"
     )
+    pedagogical_feedback: str | None = Field(
+        default=None, description="Primary pedagogical feedback tip"
+    )
+
+    @field_validator("overall_score", "fluency_score", "completeness_score", "latency_ms", mode="after")
+    @classmethod
+    def check_finite(cls, val: float | None) -> float | None:
+        if val is not None and (math.isnan(val) or math.isinf(val)):
+            raise ValueError("Numeric values must be finite and not NaN/Inf")
+        return val
+
+    @model_validator(mode="after")
+    def populate_pedagogical_feedback(self) -> "SpeechAssessmentResult":
+        if self.pedagogical_feedback is None:
+            if self.feedback_tips:
+                self.pedagogical_feedback = self.feedback_tips[0]
+            elif self.articulation_tips:
+                self.pedagogical_feedback = self.articulation_tips[0]
+        return self
 
     @property
     def reference_text(self) -> str:

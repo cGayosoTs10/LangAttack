@@ -70,16 +70,19 @@ class WhisperASR:
             raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
         # Check for corrupted audio file
+        file_size = os.path.getsize(audio_path)
+        if file_size == 0:
+            raise ValueError("Corrupted or empty audio file: 0 bytes")
+
         if audio_path.suffix.lower() == ".wav":
+            if file_size < 44:
+                raise ValueError("Corrupted or empty audio file: header too small")
             try:
                 with wave.open(str(audio_path), "rb") as wf:
-                    if wf.getnframes() == 0 or os.path.getsize(audio_path) < 44:
-                        raise ValueError("Corrupted or empty audio file")
-            except wave.Error as e:
+                    if wf.getnframes() == 0:
+                        raise ValueError("Corrupted or empty audio file: 0 frames")
+            except (wave.Error, EOFError) as e:
                 raise ValueError(f"Corrupted WAV file: {e}") from e
-        else:
-            if os.path.getsize(audio_path) == 0:
-                raise ValueError("Corrupted or empty audio file")
 
         if self._ensure_initialized() and self._model is not None:
             try:

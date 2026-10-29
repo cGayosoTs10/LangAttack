@@ -3,3 +3,4 @@
 from lang_attack.core.tts import KokoroTTS, TTSProvider, synthesize_speech
 
 __all__ = ["KokoroTTS", "TTSProvider", "synthesize_speech"]
+

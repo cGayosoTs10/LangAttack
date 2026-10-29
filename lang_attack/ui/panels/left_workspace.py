@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QDir, QModelIndex, Qt, Signal
+from PySide6.QtCore import QModelIndex, Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QFileSystemModel,
@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from lang_attack.config import NOTES_DIR
+from lang_attack.core.security import resolve_safe_path, sanitize_filename
 from lang_attack.workers.tasks import dispatch_task, ingest_url_task
 
 logger = logging.getLogger("lang_attack.ui.left")
@@ -42,9 +43,9 @@ class LeftWorkspace(QWidget):
 
         # Resolve and ensure notes directory
         if notes_dir is None:
-            self.notes_dir = Path(NOTES_DIR)
+            self.notes_dir = Path(NOTES_DIR).resolve()
         else:
-            self.notes_dir = Path(notes_dir)
+            self.notes_dir = Path(notes_dir).resolve()
         self.notes_dir.mkdir(parents=True, exist_ok=True)
 
         self._init_ui()
@@ -146,13 +147,17 @@ class LeftWorkspace(QWidget):
             "Nome da nova pasta/idioma:",
         )
         if ok and folder_name.strip():
-            clean_name = folder_name.strip().replace("/", "_").replace("\\", "_")
-            new_path = self.notes_dir / clean_name
-            new_path.mkdir(parents=True, exist_ok=True)
-            self._populate_contexts()
-            idx = self.context_combo.findText(clean_name)
-            if idx >= 0:
-                self.context_combo.setCurrentIndex(idx)
+            try:
+                clean_name = sanitize_filename(folder_name.strip(), default_name="novo_idioma")
+                new_path = resolve_safe_path(self.notes_dir, clean_name, allow_root=False)
+                new_path.mkdir(parents=True, exist_ok=True)
+                self._populate_contexts()
+                idx = self.context_combo.findText(clean_name)
+                if idx >= 0:
+                    self.context_combo.setCurrentIndex(idx)
+            except Exception as exc:
+                logger.warning("Falha ao criar pasta de idioma: %s", exc)
+                QMessageBox.warning(self, "Nome Inválido", f"Não foi possível criar a pasta: {exc}")
 
     def _open_context_menu(self, point: Any) -> None:
         index = self.tree_view.indexAt(point)
@@ -179,34 +184,56 @@ class LeftWorkspace(QWidget):
         if chosen == action_new_folder:
             name, ok = QInputDialog.getText(self, "Nova Pasta", "Nome da subpasta:")
             if ok and name.strip():
-                clean_name = name.strip()
-                QDir(str(target_dir)).mkdir(clean_name)
-                self._populate_contexts()
+                try:
+                    clean_name = sanitize_filename(name.strip(), default_name="nova_pasta")
+                    new_path = resolve_safe_path(target_dir, clean_name, allow_root=False)
+                    resolve_safe_path(self.notes_dir, new_path, allow_root=False)
+                    new_path.mkdir(parents=True, exist_ok=True)
+                    self._populate_contexts()
+                except Exception as exc:
+                    logger.warning("Falha ao criar subpasta: %s", exc)
+                    QMessageBox.warning(self, "Nome Inválido", f"Nome de pasta inválido: {exc}")
 
         elif chosen == action_new_file:
             name, ok = QInputDialog.getText(self, "Novo Arquivo", "Nome do arquivo Markdown:")
             if ok and name.strip():
-                clean_name = name.strip()
-                if not clean_name.lower().endswith(".md"):
-                    clean_name += ".md"
-                new_file = target_dir / clean_name
-                if not new_file.exists():
-                    new_file.write_text(f"# {clean_name[:-3]}\n\n", encoding="utf-8")
-                self.note_selected.emit(str(new_file))
+                try:
+                    clean_name = sanitize_filename(name.strip(), default_name="nota")
+                    if not clean_name.lower().endswith(".md"):
+                        clean_name += ".md"
+                    new_file = resolve_safe_path(target_dir, clean_name, allow_root=False)
+                    resolve_safe_path(self.notes_dir, new_file, allow_root=False)
+                    if not new_file.exists():
+                        new_file.write_text(f"# {clean_name[:-3]}\n\n", encoding="utf-8")
+                    self.note_selected.emit(str(new_file))
+                except Exception as exc:
+                    logger.warning("Falha ao criar arquivo de nota: %s", exc)
+                    QMessageBox.warning(self, "Nome Inválido", f"Nome de arquivo inválido: {exc}")
 
         elif chosen == action_rename and index.isValid():
             self.tree_view.edit(index)
 
         elif chosen == action_delete and index.isValid():
             path = Path(self.file_model.filePath(index))
+            try:
+                resolved_path = resolve_safe_path(self.notes_dir, path, allow_root=False)
+            except ValueError as exc:
+                logger.error("Tentativa de exclusão fora do diretório de notas: %s", exc)
+                QMessageBox.critical(
+                    self,
+                    "Acesso Negado",
+                    "Operação de exclusão inválida ou fora do cofre de notas.",
+                )
+                return
+
             reply = QMessageBox.question(
                 self,
                 "Confirmar Exclusão",
-                f"Tem certeza que deseja excluir '{path.name}'?",
+                f"Tem certeza que deseja excluir '{resolved_path.name}'?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if reply == QMessageBox.StandardButton.Yes:
-                if path.is_dir():
+                if resolved_path.is_dir():
                     self.file_model.remove(index)
                     self._populate_contexts()
                 else:
@@ -216,8 +243,12 @@ class LeftWorkspace(QWidget):
         if not index.isValid():
             return
         path = Path(self.file_model.filePath(index))
-        if path.is_file() and path.suffix.lower() in (".md", ".markdown"):
-            self.note_selected.emit(str(path))
+        try:
+            resolved = resolve_safe_path(self.notes_dir, path, allow_root=False)
+            if resolved.is_file() and resolved.suffix.lower() in (".md", ".markdown"):
+                self.note_selected.emit(str(resolved))
+        except Exception as exc:
+            logger.warning("Item selecionado fora do diretório seguro: %s", exc)
 
     def _import_url(self) -> None:
         url = self.url_input.text().strip()
@@ -229,7 +260,11 @@ class LeftWorkspace(QWidget):
 
         # Target active folder
         active_path = self.context_combo.currentData() or str(self.notes_dir)
-        target_dir = Path(active_path)
+        try:
+            target_dir = resolve_safe_path(self.notes_dir, active_path, allow_root=True)
+        except Exception:
+            target_dir = self.notes_dir
+
         if not target_dir.exists():
             target_dir = self.notes_dir
 

@@ -108,18 +108,16 @@ ARTICULATORY_GUIDANCE = {
 def decode_audio_samples(
     audio_path: Path | str,
     target_sample_rate: int = 16000,
+    allow_empty: bool = True,
 ) -> tuple[np.ndarray, float, int]:
-    """Decode audio file into mono float32 waveform, duration in seconds, and sample rate.
-
-    Raises:
-        FileNotFoundError: If audio file does not exist.
-        ValueError: If file is corrupted, truncated (<44 bytes), or has 0 frames.
-    """
+    """Decode audio file into mono float32 waveform, duration in seconds, and sample rate."""
     path = Path(audio_path)
     if not path.exists():
         raise FileNotFoundError(f"Audio file not found: {path}")
 
     if path.stat().st_size < 44:
+        if allow_empty:
+            return np.zeros(0, dtype=np.float32), 0.0, target_sample_rate
         raise ValueError("Corrupted or empty audio file: header too small")
 
     try:
@@ -130,6 +128,8 @@ def decode_audio_samples(
             n_frames = wf.getnframes()
 
             if n_frames == 0:
+                if allow_empty:
+                    return np.zeros(0, dtype=np.float32), 0.0, target_sample_rate
                 raise ValueError("Corrupted or empty audio file: 0 frames")
 
             raw_bytes = wf.readframes(n_frames)
@@ -141,23 +141,42 @@ def decode_audio_samples(
     elif sampwidth == 1:
         samples = (np.frombuffer(raw_bytes, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
     elif sampwidth == 4:
-        samples = np.frombuffer(raw_bytes, dtype=np.int32).astype(np.float32) / 2147483648.0
+        float_candidate = np.frombuffer(raw_bytes, dtype=np.float32)
+        if len(float_candidate) > 0 and np.max(np.abs(float_candidate)) <= 2.0:
+            samples = float_candidate
+        else:
+            samples = np.frombuffer(raw_bytes, dtype=np.int32).astype(np.float32) / 2147483648.0
     else:
         raise ValueError(f"Unsupported sample bit-depth: {sampwidth * 8}-bit")
 
-    if n_channels > 1:
-        samples = samples.reshape(-1, n_channels).mean(axis=1)
+    if n_channels > 1 and len(samples) > 0:
+        usable_len = (len(samples) // n_channels) * n_channels
+        samples = samples[:usable_len].reshape(-1, n_channels).mean(axis=1)
+
+    samples = np.nan_to_num(samples, copy=False, nan=0.0, posinf=1.0, neginf=-1.0)
+    samples = np.clip(samples, -1.0, 1.0).astype(np.float32)
 
     duration_s = float(len(samples)) / float(framerate) if framerate > 0 else 0.0
 
-    # Resample if sample rate differs from target (16kHz)
-    if framerate != target_sample_rate and len(samples) > 0:
-        new_len = int(len(samples) * target_sample_rate / framerate)
-        samples = np.interp(
-            np.linspace(0.0, float(len(samples)), new_len, endpoint=False),
-            np.arange(len(samples)),
-            samples,
-        ).astype(np.float32)
+    # Polyphase anti-aliasing resampling
+    if framerate > 0 and framerate != target_sample_rate and len(samples) > 0:
+        try:
+            from scipy.signal import resample_poly
+
+            gcd = math.gcd(target_sample_rate, framerate)
+            up = target_sample_rate // gcd
+            down = framerate // gcd
+            samples = resample_poly(samples, up, down).astype(np.float32)
+        except Exception:
+            new_len = int(len(samples) * target_sample_rate / framerate)
+            if new_len > 0:
+                samples = np.interp(
+                    np.linspace(0.0, float(len(samples) - 1), new_len),
+                    np.arange(len(samples)),
+                    samples,
+                ).astype(np.float32)
+            else:
+                samples = np.zeros(0, dtype=np.float32)
         framerate = target_sample_rate
 
     return samples, duration_s, framerate
@@ -168,13 +187,14 @@ def extract_acoustic_features(
     sample_rate: int,
     expected_word_count: int,
 ) -> dict[str, float]:
-    """Extract acoustic metrics (energy, ZCR, active ratio, cadence) from audio waveform."""
+    """Extract acoustic metrics (energy, ZCR, active ratio, cadence) with static noise detection."""
     if len(samples) == 0:
         return {
             "rms": 0.0,
             "peak": 0.0,
             "zcr": 0.0,
             "is_silent": 1.0,
+            "is_noise": 0.0,
             "speech_ratio": 0.0,
             "pacing_score": 0.0,
             "duration_s": 0.0,
@@ -196,10 +216,19 @@ def extract_acoustic_features(
         silence_thresh = max(1e-5, 0.02 * float(np.max(frame_energies)))
         active_count = np.sum(frame_energies > silence_thresh)
         speech_ratio = float(active_count) / float(num_frames)
+
+        # Dynamic variation check to distinguish static noise from modulated speech
+        mean_e = float(np.mean(frame_energies))
+        var_e = float(np.var(frame_energies))
+        energy_cov = var_e / (mean_e**2 + 1e-8)
     else:
         speech_ratio = 1.0 if rms > 1e-4 else 0.0
+        energy_cov = 1.0
 
     is_silent = 1.0 if rms < 1e-4 else 0.0
+
+    # Static noise detection: high ZCR (>0.35), uniform energy distribution (cov < 0.08), high RMS (>0.01)
+    is_noise = 1.0 if (zcr > 0.35 and energy_cov < 0.08 and rms > 0.01) else 0.0
 
     # Syllabic cadence estimation (~0.38s expected per word)
     expected_dur = max(0.4, expected_word_count * 0.38)
@@ -211,6 +240,7 @@ def extract_acoustic_features(
         "peak": peak,
         "zcr": zcr,
         "is_silent": is_silent,
+        "is_noise": is_noise,
         "speech_ratio": speech_ratio,
         "pacing_score": pacing_score,
         "duration_s": duration_s,
@@ -270,6 +300,9 @@ def _word_to_phonemes(
                 score=score,
                 status=status,
                 articulation_tip=tip,
+                expected_phoneme=sym,
+                detected_phoneme=sym if score >= 70.0 else "?",
+                is_correct=(status == "correct"),
                 start_time=p_start,
                 end_time=p_end,
             )
@@ -352,19 +385,20 @@ class Wav2VecEvaluator:
             raise FileNotFoundError(f"Audio file not found: {path}")
 
         # Decode audio frames from disk
-        samples, duration_s, sample_rate = decode_audio_samples(path)
+        samples, duration_s, sample_rate = decode_audio_samples(path, allow_empty=True)
         words = target_text.strip().split()
 
         # Extract real acoustic features
         feats = extract_acoustic_features(samples, sample_rate, len(words))
-        is_silent = feats["is_silent"] == 1.0 or feats["rms"] < 1e-4
+        is_silent = feats["is_silent"] == 1.0 or feats["rms"] < 1e-4 or len(samples) == 0
+        is_noise = feats.get("is_noise", 0.0) == 1.0
 
-        # Baseline scoring: If audio is silent, penalize as noise/silence mismatch
-        if is_silent:
-            base_score = 20.0
-            recognized_text = "noise or silence"
-            fluency_score = 30.0
-            completeness_score = 20.0
+        # Baseline scoring: If audio is silent or pure static noise, penalize heavily
+        if is_silent or is_noise:
+            base_score = 15.0 if is_noise else 20.0
+            recognized_text = "pure noise detected" if is_noise else "noise or silence"
+            fluency_score = 15.0 if is_noise else 30.0
+            completeness_score = 10.0 if is_noise else 20.0
         else:
             # Dynamic acoustic score from signal energy, rhythm cadence, and speech activity
             energy_factor = min(100.0, max(40.0, 50.0 + (feats["rms"] / 0.1) * 45.0))
@@ -419,6 +453,8 @@ class Wav2VecEvaluator:
             cur_time = w_end + 0.04
 
         overall_score = round(sum(w.score for w in word_evals) / max(1, len(word_evals)), 1)
+        if is_silent or is_noise:
+            overall_score = min(base_score, overall_score)
         elapsed_ms = round((time.perf_counter() - start_t) * 1000.0, 2)
 
         return SpeechAssessmentResult(

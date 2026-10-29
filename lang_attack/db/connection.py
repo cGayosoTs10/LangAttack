@@ -3,6 +3,8 @@
 import json
 import sqlite3
 import uuid
+from collections.abc import Generator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -17,7 +19,11 @@ def get_db_path() -> Path:
 
 def get_connection(db_path: Path | str | None = None) -> sqlite3.Connection:
     """Open and configure a SQLite connection in WAL mode with busy timeout."""
-    target_path = get_db_path() if db_path is None else (db_path if isinstance(db_path, Path) else Path(db_path))
+    target_path = (
+        get_db_path()
+        if db_path is None
+        else (db_path if isinstance(db_path, Path) else Path(db_path))
+    )
     path_str = str(target_path)
 
     if path_str != ":memory:" and not path_str.startswith(":memory:"):
@@ -29,10 +35,34 @@ def get_connection(db_path: Path | str | None = None) -> sqlite3.Connection:
     # Pragmas
     conn.execute("PRAGMA journal_mode = WAL;")
     conn.execute("PRAGMA foreign_keys = ON;")
-    conn.execute("PRAGMA busy_timeout = 5000;")
+    conn.execute("PRAGMA busy_timeout = 30000;")
     conn.execute("PRAGMA synchronous = NORMAL;")
 
     return conn
+
+
+@contextmanager
+def db_transaction(
+    conn: sqlite3.Connection | None = None, write: bool = True
+) -> Generator[sqlite3.Connection, None, None]:
+    """Context manager for safe SQLite transactions with write lock serialization and guaranteed rollback."""
+    should_close = False
+    if conn is None:
+        conn = get_connection()
+        should_close = True
+
+    try:
+        if write and not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE;")
+        yield conn
+        conn.commit()
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+    finally:
+        if should_close:
+            conn.close()
 
 
 def init_db(
@@ -55,7 +85,7 @@ def init_db(
     # Ensure pragmas are applied
     active_conn.execute("PRAGMA journal_mode = WAL;")
     active_conn.execute("PRAGMA foreign_keys = ON;")
-    active_conn.execute("PRAGMA busy_timeout = 5000;")
+    active_conn.execute("PRAGMA busy_timeout = 30000;")
     active_conn.execute("PRAGMA synchronous = NORMAL;")
 
     cursor = active_conn.cursor()
@@ -149,20 +179,21 @@ def init_db(
     return active_conn
 
 
-def record_session(session_data: dict[str, Any] | Any, conn: sqlite3.Connection | None = None) -> int:
+def record_session(
+    session_data: dict[str, Any] | Any = None,
+    conn: sqlite3.Connection | None = None,
+    **kwargs: Any,
+) -> int:
     """Record a study session into study_sessions."""
-    should_close = False
-    if conn is None:
-        conn = get_connection()
-        should_close = True
-
-    try:
+    with db_transaction(conn, write=True) as active_conn:
         if hasattr(session_data, "model_dump"):
             data = session_data.model_dump()
         elif isinstance(session_data, dict):
-            data = session_data
+            data = dict(session_data)
+        elif kwargs:
+            data = dict(kwargs)
         else:
-            data = getattr(session_data, "__dict__", {})
+            data = getattr(session_data, "__dict__", {}) if session_data else {}
 
         sess_id = data.get("session_id") or data.get("id") or str(uuid.uuid4())
         sess_uuid = data.get("session_uuid") or sess_id
@@ -170,12 +201,12 @@ def record_session(session_data: dict[str, Any] | Any, conn: sqlite3.Connection 
         topic = data.get("topic", "General")
         session_type = data.get("session_type", "practice")
         duration = float(data.get("duration_seconds", 0.0))
-        score = float(data.get("score", 0.0))
+        score = float(data.get("score") if data.get("score") is not None else data.get("average_score", 0.0))
         notes = data.get("notes", "")
         now_iso = datetime.now(UTC).isoformat()
         started_at = data.get("started_at") or data.get("start_time") or now_iso
 
-        cursor = conn.cursor()
+        cursor = active_conn.cursor()
         cursor.execute(
             """
             INSERT INTO study_sessions (
@@ -197,35 +228,42 @@ def record_session(session_data: dict[str, Any] | Any, conn: sqlite3.Connection 
                 now_iso,
             ),
         )
-        conn.commit()
-        return int(cursor.lastrowid)
-    finally:
-        if should_close:
-            conn.close()
+        return int(cursor.lastrowid) if cursor.lastrowid is not None else 0
 
 
-def record_phonetic_score(result: Any, language: str, conn: sqlite3.Connection | None = None) -> int:
+def record_phonetic_score(
+    result: Any = None,
+    language: str = "en",
+    conn: sqlite3.Connection | None = None,
+    **kwargs: Any,
+) -> int:
     """Record phonetic evaluation score into phonetic_history."""
-    should_close = False
-    if conn is None:
-        conn = get_connection()
-        should_close = True
+    with db_transaction(conn, write=True) as active_conn:
+        if result is None and kwargs:
+            result = kwargs
 
-    try:
         target_text = (
             getattr(result, "target_text", None)
             or (result.get("target_text") if isinstance(result, dict) else "")
             or getattr(result, "reference_text", "")
+            or (result.get("word") if isinstance(result, dict) else "")
+            or ""
         )
         rec_text = (
             getattr(result, "recognized_text", None)
             or (result.get("recognized_text") if isinstance(result, dict) else "")
             or getattr(result, "transcript", "")
+            or target_text
         )
-        score = float(
+        score_val = (
             getattr(result, "overall_score", None)
-            or (result.get("overall_score") if isinstance(result, dict) else 0.0)
+            if hasattr(result, "overall_score")
+            else (result.get("overall_score") if isinstance(result, dict) else None)
         )
+        if score_val is None and isinstance(result, dict):
+            score_val = result.get("gop_score", 0.0)
+        score = float(score_val if score_val is not None else 0.0)
+
         fluency = float(
             getattr(result, "fluency_score", 0.0)
             or (result.get("fluency_score", 0.0) if isinstance(result, dict) else 0.0)
@@ -263,7 +301,7 @@ def record_phonetic_score(result: Any, language: str, conn: sqlite3.Connection |
         rec_id = f"rec-{uuid.uuid4().hex[:8]}"
         now_iso = datetime.now(UTC).isoformat()
 
-        cursor = conn.cursor()
+        cursor = active_conn.cursor()
         cursor.execute(
             """
             INSERT INTO phonetic_history (
@@ -288,27 +326,24 @@ def record_phonetic_score(result: Any, language: str, conn: sqlite3.Connection |
                 now_iso,
             ),
         )
-        conn.commit()
-        return int(cursor.lastrowid)
-    finally:
-        if should_close:
-            conn.close()
+        return int(cursor.lastrowid) if cursor.lastrowid is not None else 0
 
 
 def update_vocabulary_srs(
-    word: str,
-    language: str,
-    grade: int,
+    word: str | None = None,
+    language: str = "en",
+    grade: int = 3,
     conn: sqlite3.Connection | None = None,
+    **kwargs: Any,
 ) -> None:
     """Update spaced repetition card using SuperMemo SM-2 algorithm."""
-    should_close = False
-    if conn is None:
-        conn = get_connection()
-        should_close = True
+    if word is None:
+        word = kwargs.get("term") or kwargs.get("word") or ""
+    if not word:
+        return
 
-    try:
-        cursor = conn.cursor()
+    with db_transaction(conn, write=True) as active_conn:
+        cursor = active_conn.cursor()
         cursor.execute(
             """
             SELECT id, repetition, interval_days, ease_factor
@@ -365,7 +400,7 @@ def update_vocabulary_srs(
                     item_id,
                     word,
                     word,
-                    "",
+                    kwargs.get("translation", ""),
                     language,
                     repetition,
                     repetition,
@@ -401,10 +436,6 @@ def update_vocabulary_srs(
                     row_id,
                 ),
             )
-        conn.commit()
-    finally:
-        if should_close:
-            conn.close()
 
 
 def record_pipeline_metric(
@@ -416,15 +447,10 @@ def record_pipeline_metric(
     conn: sqlite3.Connection | None = None,
 ) -> None:
     """Persist execution latency and status for a pipeline run."""
-    should_close = False
-    if conn is None:
-        conn = get_connection()
-        should_close = True
-
-    try:
+    with db_transaction(conn, write=True) as active_conn:
         metric_id = f"m-{uuid.uuid4().hex[:8]}"
         now_iso = datetime.now(UTC).isoformat()
-        cursor = conn.cursor()
+        cursor = active_conn.cursor()
         cursor.execute(
             """
             INSERT INTO pipeline_metrics (
@@ -447,10 +473,6 @@ def record_pipeline_metric(
                 now_iso,
             ),
         )
-        conn.commit()
-    finally:
-        if should_close:
-            conn.close()
 
 
 def get_session_history(
@@ -537,6 +559,7 @@ def get_due_srs_words(
 
 
 __all__ = [
+    "db_transaction",
     "get_connection",
     "get_db_path",
     "get_due_srs_words",

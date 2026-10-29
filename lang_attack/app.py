@@ -39,6 +39,15 @@ def main() -> int:
     window = MainWindow()
     window.show()
 
+    def _cleanup_threads() -> None:
+        from PySide6.QtCore import QThreadPool
+
+        pool = QThreadPool.globalInstance()
+        pool.clear()
+        pool.waitForDone(1500)
+
+    app.aboutToQuit.connect(_cleanup_threads)
+
     if is_test_run:
         return 0
 

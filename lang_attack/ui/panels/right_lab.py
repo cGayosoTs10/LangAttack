@@ -21,6 +21,8 @@ from PySide6.QtWidgets import (
 )
 
 from lang_attack.core.audio_recorder import AudioRecorder
+from lang_attack.core.phonetics import evaluate_speech
+from lang_attack.core.security import secure_temp_audio_file
 from lang_attack.schemas.phonetics import SpeechAssessmentResult
 from lang_attack.workers.tasks import (
     dispatch_task,
@@ -29,6 +31,18 @@ from lang_attack.workers.tasks import (
 )
 
 logger = logging.getLogger("lang_attack.ui.right")
+
+
+def save_and_evaluate_speech_task(
+    target_text: str,
+    audio_data: Any,
+    output_path: Path | str,
+    language: str = "en",
+) -> Any:
+    """Save WAV audio and evaluate speech pronunciation entirely in background worker thread."""
+    recorder = AudioRecorder(sample_rate=16000, channels=1)
+    saved_wav = recorder.save_wav(output_path, audio_data)
+    return evaluate_speech(target_text=target_text, audio_path=saved_wav, language=language)
 
 
 class RightLab(QWidget):
@@ -44,8 +58,8 @@ class RightLab(QWidget):
         self.current_speed: float = 1.0
         self.target_text: str = "The quick brown fox jumps over the lazy dog."
         self.recorder = AudioRecorder(sample_rate=16000, channels=1)
-        self._recorded_wav: Path = Path("/tmp/lang_attack_recorded.wav")
-        self._tutor_wav: Path = Path("/tmp/lang_attack_target.wav")
+        self._recorded_wav: Path = secure_temp_audio_file(prefix="lang_attack_rec_", suffix=".wav")
+        self._tutor_wav: Path = secure_temp_audio_file(prefix="lang_attack_tutor_", suffix=".wav")
 
         self._init_ui()
 
@@ -158,6 +172,15 @@ class RightLab(QWidget):
             return
         super().keyPressEvent(event)
 
+    def cleanup(self) -> None:
+        """Release audio stream and hardware cleanly."""
+        if hasattr(self, "recorder") and self.recorder is not None and self.recorder.is_recording:
+            self.recorder.stop_recording()
+
+    def closeEvent(self, event: Any) -> None:  # noqa: N802
+        self.cleanup()
+        event.accept()
+
     def _play_target_audio(self) -> None:
         """Synthesize and play tutor model audio."""
         text = self.txt_target.toPlainText().strip()
@@ -201,13 +224,12 @@ class RightLab(QWidget):
             self.lbl_record_status.setStyleSheet("color: #3b82f6;")
 
             audio_data = self.recorder.stop_recording()
-            self.recorder.save_wav(self._recorded_wav, audio_data)
-
-            # Dispatch acoustic evaluation
             target = self.txt_target.toPlainText().strip()
-            self._evaluate_pronunciation(target, self._recorded_wav)
+            self._evaluate_pronunciation_async(target, audio_data, self._recorded_wav)
 
-    def _evaluate_pronunciation(self, target_text: str, audio_path: Path) -> None:
+    def _evaluate_pronunciation_async(
+        self, target_text: str, audio_data: Any, output_path: Path
+    ) -> None:
         def on_result(assessment: SpeechAssessmentResult) -> None:
             self.lbl_record_status.setText(
                 f"Avaliação concluída! Pontuação Geral: {assessment.overall_score:.1f}%"
@@ -218,13 +240,60 @@ class RightLab(QWidget):
             phonemes_data: list[dict[str, Any]] = []
             for word in assessment.words:
                 for ph in word.phonemes:
-                    phonemes_data.append({"symbol": ph.expected_phoneme, "score": ph.gop_score})
+                    phonemes_data.append(
+                        {"symbol": ph.expected_phoneme or ph.phoneme, "score": ph.gop_score}
+                    )
 
             html = self.render_phonetic_html(phonemes_data)
             self.phonetic_display.setHtml(html)
 
             # Articulatory feedback
-            art_text = assessment.pedagogical_feedback or "Pronúncia adequada nos fonemas principais."
+            art_text = getattr(assessment, "pedagogical_feedback", None)
+            if not art_text and getattr(assessment, "feedback_tips", None):
+                art_text = assessment.feedback_tips[0]
+            if not art_text:
+                art_text = "Pronúncia adequada nos fonemas principais."
+            self.feedback_box.setHtml(f"<div style='color: #e0e7ff;'>{art_text}</div>")
+
+            self.assessment_completed.emit(assessment)
+
+        def on_error(err_type: str, err_msg: str) -> None:
+            self.lbl_record_status.setText(f"Erro na avaliação: {err_msg}")
+            self.lbl_record_status.setStyleSheet("color: #ef4444;")
+
+        dispatch_task(
+            save_and_evaluate_speech_task,
+            target_text=target_text,
+            audio_data=audio_data,
+            output_path=output_path,
+            language="en",
+            on_result=on_result,
+            on_error=on_error,
+        )
+
+    def _evaluate_pronunciation(self, target_text: str, audio_path: Path) -> None:
+        """Synchronous or direct evaluation fallback."""
+        def on_result(assessment: SpeechAssessmentResult) -> None:
+            self.lbl_record_status.setText(
+                f"Avaliação concluída! Pontuação Geral: {assessment.overall_score:.1f}%"
+            )
+            self.lbl_record_status.setStyleSheet("color: #10b981; font-weight: bold;")
+
+            phonemes_data: list[dict[str, Any]] = []
+            for word in assessment.words:
+                for ph in word.phonemes:
+                    phonemes_data.append(
+                        {"symbol": ph.expected_phoneme or ph.phoneme, "score": ph.gop_score}
+                    )
+
+            html = self.render_phonetic_html(phonemes_data)
+            self.phonetic_display.setHtml(html)
+
+            art_text = getattr(assessment, "pedagogical_feedback", None)
+            if not art_text and getattr(assessment, "feedback_tips", None):
+                art_text = assessment.feedback_tips[0]
+            if not art_text:
+                art_text = "Pronúncia adequada nos fonemas principais."
             self.feedback_box.setHtml(f"<div style='color: #e0e7ff;'>{art_text}</div>")
 
             self.assessment_completed.emit(assessment)
@@ -242,15 +311,21 @@ class RightLab(QWidget):
             on_error=on_error,
         )
 
-    def render_phonetic_html(self, phonemes: list[dict[str, Any]]) -> str:
-        """Render GOP color-coded phonetic visualization.
+    def render_phonetic_html(self, phonemes: list[dict[str, Any]], max_spans: int = 200) -> str:
+        """Render GOP color-coded phonetic visualization with span count bounding to avoid GUI lag.
 
         Green (#4CAF50): Canonical correct (score >= 75.0 or 0.75)
         Yellow (#FFC107): Accented / minor variation (score >= 45.0 or 0.45)
         Red (#F44336): Critical phoneme deviation (score < 45.0 or 0.45)
         """
         spans: list[str] = []
-        for ph in phonemes:
+        truncated = False
+        display_phonemes = phonemes
+        if len(phonemes) > max_spans:
+            display_phonemes = phonemes[:max_spans]
+            truncated = True
+
+        for ph in display_phonemes:
             symbol = ph.get("symbol") or ph.get("phoneme") or ""
             score = float(ph.get("score", 0.0))
 
@@ -267,6 +342,12 @@ class RightLab(QWidget):
             spans.append(
                 f"<span style='color: {color}; font-size: 20px; font-weight: bold; margin: 0 3px;' "
                 f"title='GOP: {val:.1f}'>{symbol}</span>"
+            )
+
+        if truncated:
+            spans.append(
+                f"<span style='color: #9ca3af; font-size: 13px; margin-left: 8px;'>"
+                f"... (+{len(phonemes) - max_spans} fonemas truncados)</span>"
             )
 
         html = (

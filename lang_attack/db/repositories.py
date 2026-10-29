@@ -32,16 +32,19 @@ class SessionRepository:
         words_practiced: int = 0,
         average_score: float = 0.0,
     ) -> None:
-        record_session(
-            session_id=session_id,
-            language=language,
-            start_time=start_time,
-            end_time=end_time,
-            duration_seconds=duration_seconds,
-            words_practiced=words_practiced,
-            average_score=average_score,
-            conn=self._conn,
-        )
+        payload = {
+            "session_id": session_id,
+            "session_uuid": session_id,
+            "language": language,
+            "start_time": str(start_time),
+            "started_at": str(start_time),
+            "end_time": str(end_time) if end_time else None,
+            "duration_seconds": float(duration_seconds),
+            "words_practiced": int(words_practiced),
+            "score": float(average_score),
+            "average_score": float(average_score),
+        }
+        record_session(session_data=payload, conn=self._conn)
 
     def list_recent(self, limit: int = 50, language: str | None = None) -> list[dict[str, Any]]:
         return get_session_history(limit=limit, language=language, conn=self._conn)
@@ -62,15 +65,32 @@ class PhoneticRepository:
         detected_phoneme: str,
         gop_score: float,
     ) -> int:
-        return record_phonetic_score(
-            session_id=session_id,
-            language=language,
-            word=word,
-            expected_phoneme=expected_phoneme,
-            detected_phoneme=detected_phoneme,
-            gop_score=gop_score,
-            conn=self._conn,
-        )
+        payload = {
+            "session_id": session_id,
+            "target_text": word,
+            "recognized_text": word,
+            "overall_score": float(gop_score),
+            "words": [
+                {
+                    "word": word,
+                    "score": float(gop_score),
+                    "phonemes": [
+                        {
+                            "phoneme": detected_phoneme,
+                            "expected_phoneme": expected_phoneme,
+                            "detected_phoneme": detected_phoneme,
+                            "score": float(gop_score),
+                            "status": (
+                                "correct"
+                                if gop_score >= 75.0
+                                else ("warning" if gop_score >= 50.0 else "incorrect")
+                            ),
+                        }
+                    ],
+                }
+            ],
+        }
+        return record_phonetic_score(result=payload, language=language, conn=self._conn)
 
     def list_history(
         self,
@@ -88,10 +108,10 @@ class PhoneticRepository:
                 query += " AND language = ?"
                 params.append(language)
             if min_gop is not None:
-                query += " AND gop_score >= ?"
+                query += " AND overall_score >= ?"
                 params.append(min_gop)
             if max_gop is not None:
-                query += " AND gop_score <= ?"
+                query += " AND overall_score <= ?"
                 params.append(max_gop)
             query += " ORDER BY id DESC LIMIT ?"
             params.append(limit)
@@ -118,14 +138,21 @@ class SRSRepository:
         translation: str | None = None,
         context_sentence: str | None = None,
     ) -> dict[str, Any]:
-        return update_vocabulary_srs(
+        update_vocabulary_srs(
+            word=term,
             language=language,
-            term=term,
             grade=grade,
-            translation=translation,
-            context_sentence=context_sentence,
+            translation=translation or "",
+            context_sentence=context_sentence or "",
             conn=self._conn,
         )
+        return {
+            "term": term,
+            "word": term,
+            "language": language,
+            "grade": grade,
+            "translation": translation,
+        }
 
     def get_due_items(self, language: str | None = None) -> list[dict[str, Any]]:
         return get_due_srs_words(language=language, conn=self._conn)
@@ -140,7 +167,9 @@ class MetricsRepository:
     def record_metric(self, pipeline_name: str, latency_ms: float, status: str) -> None:
         record_pipeline_metric(pipeline_name, latency_ms, status, conn=self._conn)
 
-    def list_metrics(self, pipeline_name: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    def list_metrics(
+        self, pipeline_name: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
         conn = self._conn or get_connection()
         should_close = self._conn is None
         try:
