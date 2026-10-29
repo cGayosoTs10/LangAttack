@@ -123,7 +123,7 @@ class GenericWorker(QRunnable):
                 if "progress_callback" in params or has_var_keyword:
                     call_kwargs["progress_callback"] = self._emit_progress
             except (ValueError, TypeError):
-                call_kwargs["progress_callback"] = self._emit_progress
+                pass
 
         self.signals.started.emit()
         try:
@@ -136,7 +136,8 @@ class GenericWorker(QRunnable):
                 exc,
                 exc_info=True,
             )
-            self.signals.error.emit(type(exc).__name__, str(exc))
+            if not self._is_cancelled:
+                self.signals.error.emit(type(exc).__name__, str(exc))
         else:
             if not self._is_cancelled:
                 self.signals.result.emit(res)

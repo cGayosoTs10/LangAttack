@@ -28,9 +28,10 @@ _ = zoneinfo.ZoneInfo("UTC")
 # 1. Enforce headless Qt platform before any PySide6 import
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
-# 2. Add local system site-packages if needed for PySide6 and Pydantic
+# 2. Add local system site-packages if needed for PySide6, Pydantic, and Numpy
 for candidate in [
     "/home/lobachevsky/.local/lib/python3.14/site-packages",
+    "/usr/lib64/python3.14/site-packages",
     "/usr/lib/python3.14/site-packages",
     "/home/lobachevsky/.local/lib/python3.13/site-packages",
 ]:
@@ -60,16 +61,49 @@ except ImportError:
 # Audio Wave Helper
 # ---------------------------------------------------------------------------
 def generate_test_wav(
-    file_path: Path, duration_s: float = 1.0, sample_rate: int = 16000, channels: int = 1
+    file_path: Path,
+    duration_s: float = 1.0,
+    sample_rate: int = 16000,
+    channels: int = 1,
+    tone_hz: float = 220.0,
+    silence: bool = False,
 ) -> Path:
-    """Generate a valid PCM 16-bit mono 16kHz WAV file for tests."""
+    """Generate a valid PCM 16-bit mono 16kHz WAV file for tests.
+
+    If silence=False, synthesizes a multi-harmonic signal with speech-like
+    amplitude modulation (RMS ~0.15) so acoustic evaluators detect audible speech.
+    If silence=True, writes digital silence (zero bytes).
+    """
+    import math
+    import struct
+
     file_path.parent.mkdir(parents=True, exist_ok=True)
     num_frames = int(duration_s * sample_rate)
+
+    if silence:
+        raw_bytes = b"\x00\x00" * (num_frames * channels)
+    else:
+        samples = []
+        for i in range(num_frames):
+            t = i / sample_rate
+            # 4Hz syllabic rhythm amplitude envelope
+            env = 0.5 * (1.0 + math.sin(2.0 * math.pi * 4.0 * t))
+            val = env * (
+                0.6 * math.sin(2.0 * math.pi * tone_hz * t)
+                + 0.3 * math.sin(2.0 * math.pi * (tone_hz * 2.0) * t)
+                + 0.1 * math.sin(2.0 * math.pi * (tone_hz * 3.5) * t)
+            )
+            int_val = int(max(-32767, min(32767, val * 16384.0)))
+            for _ in range(channels):
+                samples.append(int_val)
+        raw_bytes = struct.pack(f"<{len(samples)}h", *samples)
+
     with wave.open(str(file_path), "wb") as wf:
         wf.setnchannels(channels)
-        wf.setsampwidth(2)  # 16-bit
+        wf.setsampwidth(2)
         wf.setframerate(sample_rate)
-        wf.writeframes(b"\x00\x00" * num_frames)
+        wf.writeframes(raw_bytes)
+
     return file_path
 
 

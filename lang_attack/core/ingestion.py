@@ -40,6 +40,7 @@ def extract_video_id(url_or_video_id: str) -> str:
     - Embed: https://www.youtube.com/embed/VIDEO_ID
     - Live: https://www.youtube.com/live/VIDEO_ID
     - Raw Video ID: Alphanumeric string with optional '-' or '_'
+    Returns empty string "" on unrecognized or invalid non-YouTube URLs.
     """
     if not url_or_video_id or not isinstance(url_or_video_id, str):
         return ""
@@ -51,16 +52,21 @@ def extract_video_id(url_or_video_id: str) -> str:
         re.fullmatch(r"[\w-]{3,32}", clean_input)
         and "://" not in clean_input
         and "/" not in clean_input
+        and "?" not in clean_input
+        and "=" not in clean_input
     ):
         return clean_input
 
+    to_parse = clean_input if "://" in clean_input else f"https://{clean_input}"
     try:
-        parsed = urllib.parse.urlparse(clean_input)
+        parsed = urllib.parse.urlparse(to_parse)
     except Exception:
         return ""
 
+    netloc = parsed.netloc.lower()
+
     # Parse youtube.com URLs
-    if "youtube.com" in parsed.netloc or "youtube" in parsed.netloc:
+    if "youtube.com" in netloc or "youtube" in netloc:
         query_params = urllib.parse.parse_qs(parsed.query)
         if "v" in query_params and query_params["v"]:
             return query_params["v"][0]
@@ -72,20 +78,21 @@ def extract_video_id(url_or_video_id: str) -> str:
             return path_parts[-1]
 
     # Parse youtu.be short URLs
-    if "youtu.be" in parsed.netloc:
+    if "youtu.be" in netloc:
         path_parts = [p for p in parsed.path.split("/") if p]
         if path_parts:
             return path_parts[0]
 
-    # Fallback regex search for embedded ID in query or path
-    match = re.search(
-        r"(?:v=|\/v\/|\/embed\/|\/shorts\/|\/live\/|youtu\.be\/)([\w-]{3,32})",
-        clean_input,
-    )
-    if match:
-        return match.group(1)
+    # Fallback regex search ONLY if string references youtube or youtu.be
+    if "youtube" in clean_input.lower() or "youtu.be" in clean_input.lower():
+        match = re.search(
+            r"(?:v=|\/v\/|\/embed\/|\/shorts\/|\/live\/|youtu\.be\/)([\w-]{3,32})",
+            clean_input,
+        )
+        if match:
+            return match.group(1)
 
-    return clean_input
+    return ""
 
 
 @latency_tracker("extract_youtube_transcript")
@@ -388,20 +395,62 @@ def transcript_to_markdown(
     return "\n".join(lines)
 
 
+def _split_oversized_paragraph(para: str, max_chunk_size: int) -> list[str]:
+    """Split a single paragraph exceeding max_chunk_size by sentence boundaries or character windows."""
+    sentences = re.split(r"(?<=[.!?])\s+", para.strip())
+    sub_chunks: list[str] = []
+    current_sentences: list[str] = []
+    current_len = 0
+
+    for sent in sentences:
+        if not sent:
+            continue
+        # If a single sentence exceeds max_chunk_size, split by character window
+        if len(sent) > max_chunk_size:
+            if current_sentences:
+                sub_chunks.append(" ".join(current_sentences))
+                current_sentences = []
+                current_len = 0
+            for start in range(0, len(sent), max_chunk_size):
+                sub_chunks.append(sent[start : start + max_chunk_size])
+            continue
+
+        sent_len = len(sent) + (1 if current_sentences else 0)
+        if current_len + sent_len > max_chunk_size and current_sentences:
+            sub_chunks.append(" ".join(current_sentences))
+            current_sentences = [sent]
+            current_len = len(sent)
+        else:
+            current_sentences.append(sent)
+            current_len += sent_len
+
+    if current_sentences:
+        sub_chunks.append(" ".join(current_sentences))
+
+    return sub_chunks
+
+
 def chunk_article_text(text: str, max_chunk_size: int = 4000) -> list[str]:
-    """Split article text into smaller paragraphs chunks adhering to max size limits."""
+    """Split article text into smaller paragraph chunks adhering strictly to max size limits."""
     if not text:
         return []
     if len(text) <= max_chunk_size:
         return [text]
 
     paragraphs = text.split("\n\n")
+    expanded_paragraphs: list[str] = []
+    for para in paragraphs:
+        if len(para) > max_chunk_size:
+            expanded_paragraphs.extend(_split_oversized_paragraph(para, max_chunk_size))
+        else:
+            expanded_paragraphs.append(para)
+
     chunks: list[str] = []
     current_chunk: list[str] = []
     current_length = 0
 
-    for para in paragraphs:
-        para_len = len(para) + 2
+    for para in expanded_paragraphs:
+        para_len = len(para) + (2 if current_chunk else 0)
         if current_length + para_len > max_chunk_size and current_chunk:
             chunks.append("\n\n".join(current_chunk))
             current_chunk = [para]

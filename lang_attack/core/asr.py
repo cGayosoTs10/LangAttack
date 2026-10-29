@@ -69,13 +69,17 @@ class WhisperASR:
         if not audio_path.exists():
             raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
-        # Check for corrupted WAV header
-        try:
-            with wave.open(str(audio_path), "rb") as wf:
-                if wf.getnframes() == 0 and os.path.getsize(audio_path) < 44:
-                    raise ValueError("Corrupted or empty audio file")
-        except wave.Error as e:
-            raise ValueError(f"Corrupted WAV file: {e}") from e
+        # Check for corrupted audio file
+        if audio_path.suffix.lower() == ".wav":
+            try:
+                with wave.open(str(audio_path), "rb") as wf:
+                    if wf.getnframes() == 0 or os.path.getsize(audio_path) < 44:
+                        raise ValueError("Corrupted or empty audio file")
+            except wave.Error as e:
+                raise ValueError(f"Corrupted WAV file: {e}") from e
+        else:
+            if os.path.getsize(audio_path) == 0:
+                raise ValueError("Corrupted or empty audio file")
 
         if self._ensure_initialized() and self._model is not None:
             try:
@@ -89,12 +93,8 @@ class WhisperASR:
             except Exception as e:
                 logger.warning("Whisper transcription failed: %s. Using fallback.", e)
 
-        # Deterministic fallback hypothesis
+        # Generic deterministic fallback hypothesis when faster-whisper is unavailable
         fallback_text = "The quick brown fox jumps over the lazy dog."
-        if language in ("pt", "pt-BR"):
-            fallback_text = "Eu quero comprar um pão fresco."
-        elif language in ("fr", "fr-FR"):
-            fallback_text = "Bonjour tout le monde."
 
         return {
             "text": fallback_text,
