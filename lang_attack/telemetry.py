@@ -200,6 +200,13 @@ def setup_telemetry(
     return app_logger, latency_logger
 
 
+def setup_daily_logging(
+    base_dir: Path | None = None,
+) -> tuple[logging.Logger, logging.Logger]:
+    """Alias for setup_telemetry to match Section 3 specification."""
+    return setup_telemetry(base_dir=base_dir)
+
+
 def latency_tracker(pipeline_name: str) -> Callable[[Callable[..., T]], Callable[..., T]]:
     """Decorator to measure and log execution latency of critical pipelines.
 
@@ -355,5 +362,6 @@ __all__ = [
     "sanitize_pipeline_name",
     "scan_ast_for_forbidden_debuggers",
     "scan_codebase_for_debuggers",
+    "setup_daily_logging",
     "setup_telemetry",
 ]

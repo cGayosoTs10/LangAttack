@@ -1,4 +1,4 @@
-"""Database package for SQLite persistence."""
+"""Database management and repository package."""
 
 from lang_attack.db.connection import (
     get_connection,
@@ -11,8 +11,18 @@ from lang_attack.db.connection import (
     record_session,
     update_vocabulary_srs,
 )
+from lang_attack.db.repositories import (
+    MetricsRepository,
+    PhoneticRepository,
+    SessionRepository,
+    SRSRepository,
+)
 
 __all__ = [
+    "MetricsRepository",
+    "PhoneticRepository",
+    "SRSRepository",
+    "SessionRepository",
     "get_connection",
     "get_db_path",
     "get_due_srs_words",

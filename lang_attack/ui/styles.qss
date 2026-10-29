@@ -1,0 +1,183 @@
+/* LangAttack Professional Dark Theme */
+
+QMainWindow, QWidget#centralWidget {
+    background-color: #12121e;
+    color: #e0e0f0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size: 13px;
+}
+
+QSplitter::handle {
+    background-color: #232338;
+    width: 3px;
+    height: 3px;
+}
+
+QSplitter::handle:hover {
+    background-color: #6366f1;
+}
+
+/* Panels */
+QWidget#leftWorkspace, QWidget#centerDeck, QWidget#rightLab {
+    background-color: #181828;
+    border: 1px solid #282840;
+    border-radius: 8px;
+}
+
+/* Tree View */
+QTreeView {
+    background-color: #141424;
+    border: 1px solid #282840;
+    border-radius: 6px;
+    color: #d1d5db;
+    padding: 4px;
+}
+
+QTreeView::item:hover {
+    background-color: #24243e;
+    border-radius: 4px;
+}
+
+QTreeView::item:selected {
+    background-color: #4f46e5;
+    color: #ffffff;
+    border-radius: 4px;
+}
+
+/* Tabs */
+QTabWidget::pane {
+    border: 1px solid #282840;
+    border-radius: 6px;
+    background-color: #141424;
+}
+
+QTabBar::tab {
+    background-color: #1c1c30;
+    color: #9ca3af;
+    padding: 8px 16px;
+    margin-right: 2px;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+    font-weight: 500;
+}
+
+QTabBar::tab:selected {
+    background-color: #141424;
+    color: #ffffff;
+    border-bottom: 2px solid #6366f1;
+}
+
+QTabBar::tab:hover {
+    color: #ffffff;
+    background-color: #23233c;
+}
+
+/* Buttons */
+QPushButton {
+    background-color: #312e81;
+    color: #ffffff;
+    border: 1px solid #4338ca;
+    border-radius: 6px;
+    padding: 6px 12px;
+    font-weight: 500;
+}
+
+QPushButton:hover {
+    background-color: #3730a3;
+    border-color: #4f46e5;
+}
+
+QPushButton:pressed {
+    background-color: #1e1b4b;
+}
+
+QPushButton:disabled {
+    background-color: #202030;
+    color: #6b7280;
+    border-color: #2d2d42;
+}
+
+/* Record Button */
+QPushButton#recordButton {
+    background-color: #be123c;
+    border-color: #e11d48;
+    font-weight: bold;
+}
+
+QPushButton#recordButton:hover {
+    background-color: #e11d48;
+}
+
+QPushButton#recordButton:checked {
+    background-color: #f43f5e;
+}
+
+/* LineEdits and TextEdits */
+QLineEdit, QTextEdit, QPlainTextEdit, QTextBrowser {
+    background-color: #141424;
+    color: #f3f4f6;
+    border: 1px solid #2d2d44;
+    border-radius: 6px;
+    padding: 6px 10px;
+    selection-background-color: #4f46e5;
+}
+
+QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus {
+    border: 1px solid #6366f1;
+}
+
+/* ComboBox */
+QComboBox {
+    background-color: #1c1c30;
+    color: #f3f4f6;
+    border: 1px solid #2d2d44;
+    border-radius: 6px;
+    padding: 6px 10px;
+}
+
+QComboBox::drop-down {
+    border: none;
+    width: 20px;
+}
+
+QComboBox QAbstractItemView {
+    background-color: #1c1c30;
+    border: 1px solid #2d2d44;
+    selection-background-color: #4f46e5;
+    color: #f3f4f6;
+}
+
+/* ScrollBar */
+QScrollBar:vertical {
+    border: none;
+    background-color: #12121e;
+    width: 8px;
+    margin: 0px;
+    border-radius: 4px;
+}
+
+QScrollBar::handle:vertical {
+    background-color: #2d2d44;
+    min-height: 20px;
+    border-radius: 4px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background-color: #4338ca;
+}
+
+/* GOP Pronunciation Color Classes */
+.gop-canonical, .gop-green {
+    color: #4CAF50;
+    font-weight: bold;
+}
+
+.gop-accented, .gop-yellow {
+    color: #FFC107;
+    font-weight: bold;
+}
+
+.gop-critical, .gop-red {
+    color: #F44336;
+    font-weight: bold;
+}

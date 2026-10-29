@@ -8,12 +8,22 @@ from lang_attack.schemas.phonetics import (
     SpeechAssessmentResult,
     WordEvaluation,
 )
+from lang_attack.schemas.session import (
+    PhoneticHistoryRecord,
+    PipelineMetricRecord,
+    StudySession,
+    StudySessionCreate,
+)
 
 __all__ = [
     "ExerciseItem",
     "ExerciseSession",
     "ExerciseType",
     "PhonemeEvaluation",
+    "PhoneticHistoryRecord",
+    "PipelineMetricRecord",
     "SpeechAssessmentResult",
+    "StudySession",
+    "StudySessionCreate",
     "WordEvaluation",
 ]
